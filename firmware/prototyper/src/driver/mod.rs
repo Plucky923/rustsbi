@@ -68,7 +68,7 @@ fn bind_interrupts(
             warn!("AIA: skipping QEMU virt M-APLIC setup on '{}'", board.model);
             None
         };
-        let ipi = aia::bind(imsic, aplic_config, memory)?;
+        let ipi = Box::new(aia::bind(imsic, aplic_config, memory)?);
         return Ok((None, Some(ipi)));
     }
     if let (Some(plmt), Some(plicsw)) = (

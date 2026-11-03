@@ -5,7 +5,7 @@
 //! - Specification: [RISC-V AIA 1.0](https://docs.riscv.org/reference/aia/v1.0/IMSIC.html),
 //!   sections 2.1.5 and 2.1.8 — IMSIC MMIO pages and interrupt-file setup.
 
-use alloc::boxed::Box;
+use alloc::vec::Vec;
 use runtime::{
     Error, Result,
     hart::HartId,
@@ -23,43 +23,24 @@ pub(crate) const IMSIC_COMPATIBLES: [&str; 1] = ["riscv,imsics"];
 const IMSIC_FILE_PAGE_SHIFT: u32 = 12;
 pub(crate) const IMSIC_FILE_SPAN: usize = 1usize << IMSIC_FILE_PAGE_SHIFT;
 
-#[repr(usize)]
-#[derive(Clone, Copy)]
-enum Register {
-    SetEipnumLe = 0x0000,
-}
-
-impl Register {
-    const fn offset(self) -> usize {
-        self as usize
-    }
-}
+/// MMIO offset of the `seteipnum_le` register.
+const SETEIPNUM_LE: usize = 0x0000;
 
 /// IMSIC-backed IPI device delivering software interrupts as MSIs to each
 /// hart's machine-level interrupt file.
-pub(super) struct ImsicIpi {
+pub(super) struct ImsicDevice {
     ipi_iid: Iid,
     num_iids: u16,
-    hart_files: Box<[MmioRegion]>,
+    hart_files: Vec<MmioRegion>,
 }
 
-impl ImsicIpi {
-    pub(super) fn new(ipi_iid: Iid, num_iids: u16, hart_files: Box<[MmioRegion]>) -> Self {
-        Self {
-            ipi_iid,
-            num_iids,
-            hart_files,
-        }
-    }
-}
-
-impl IpiDevice for ImsicIpi {
+impl IpiDevice for ImsicDevice {
     #[inline(always)]
     fn send(&self, req: IpiRequest) -> Result<()> {
         for hart_id in req.harts() {
             let hart = HartId::from_raw(hart_id).map_err(|_| Error::IoError)?;
             let file = self.hart_files.get(hart.index()).ok_or(Error::IoError)?;
-            file.write(Register::SetEipnumLe.offset(), self.ipi_iid.number() as u32)
+            file.write(SETEIPNUM_LE, self.ipi_iid.number() as u32)
                 .map_err(|_| Error::IoError)?;
         }
         Ok(())
@@ -79,23 +60,23 @@ pub(super) fn bind(
     imsic: &ImsicInfo,
     aplic_config: Option<QemuAplicConfig>,
     memory: &mut MemoryRegistry,
-) -> Result<Box<dyn IpiDevice>> {
+) -> Result<ImsicDevice> {
     // No fallback is permitted after the first MMIO window is issued. All
     // hardware capability checks above therefore precede initialization.
-    let hart_files: Result<alloc::vec::Vec<_>> = imsic
+    let hart_files: Result<Vec<_>> = imsic
         .hart_files
         .iter()
         .map(|register_range| memory.acquire(*register_range))
         .collect();
-    let ipi = ImsicIpi::new(
-        imsic.ipi_iid,
-        imsic.num_iids,
-        hart_files?.into_boxed_slice(),
-    );
+    let device = ImsicDevice {
+        ipi_iid: imsic.ipi_iid,
+        num_iids: imsic.num_iids,
+        hart_files: hart_files?,
+    };
 
     if let Some(aplic_config) = aplic_config {
         aplic_config.bind(memory)?;
     }
 
-    Ok(Box::new(ipi))
+    Ok(device)
 }
